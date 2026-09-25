@@ -24,6 +24,10 @@ export type Shared = {
   setTrendModel: (m: TrendModel) => void
   bandYears: number
   setBandYears: (y: number) => void
+  themeChoice: ThemeChoice
+  setThemeChoice: (t: ThemeChoice) => void
+  refresh: () => void
+  refreshing: boolean
 }
 
 export default function App() {
@@ -38,12 +42,17 @@ export default function App() {
   const [themeChoice, setThemeChoice, theme] = useTheme()
   const [trendModel, setTrendModel] = usePersisted<TrendModel>('trendModel', 'auto')
   const [bandYears, setBandYears] = usePersisted('bandYears', 2)
+  const [lastTicker, setLastTicker] = usePersisted('lastTicker', 'GGAL')
 
   useEffect(() => {
     const onHash = () => setRoute(parseHash())
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
+
+  useEffect(() => {
+    if (route.page === 'chart') setLastTicker(route.ticker)
+  }, [route, setLastTicker])
 
   useEffect(() => {
     api.meta().then(setMeta, (e: Error) => setError(e.message))
@@ -61,19 +70,17 @@ export default function App() {
 
   const shared: Shared = {
     denom, setDenom, fit, setFit, trendYears, setTrendYears, theme,
-    trendModel, setTrendModel, bandYears, setBandYears,
+    trendModel, setTrendModel, bandYears, setBandYears, themeChoice, setThemeChoice, refresh, refreshing,
   }
 
   return (
     <div className="app">
+      {route.page === 'leaders' && (
       <header className="topbar">
         <a className="brand" href="#/">BYMA Charts</a>
         <nav>
           <a href="#/" className={route.page === 'leaders' ? 'active' : ''}>Leaderboard</a>
-          <a
-            href={`#/chart/${route.page === 'chart' ? route.ticker : 'GGAL'}`}
-            className={route.page === 'chart' ? 'active' : ''}
-          >
+          <a href={`#/chart/${lastTicker}`}>
             Chart
           </a>
         </nav>
@@ -91,6 +98,7 @@ export default function App() {
           {refreshing ? 'Refreshing…' : 'Refresh data'}
         </button>
       </header>
+      )}
       {error && <div className="error">Backend unreachable: {error}</div>}
       {meta && route.page === 'leaders' && <LeaderboardView key={reloadKey} meta={meta} shared={shared} />}
       {meta && route.page === 'chart' && (

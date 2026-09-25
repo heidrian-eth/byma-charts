@@ -15,6 +15,8 @@ from app.sources import data912
 logging.basicConfig(level=logging.INFO)
 
 REFRESH_EVERY_SECONDS = 15 * 60
+# The today panel waits for a fetch when its prices are older than this.
+TODAY_MAX_AGE_SECONDS = 5 * 60
 
 
 def _all_keys(tickers: list[str]) -> list[str]:
@@ -215,6 +217,50 @@ async def chart(
     }
 
 
+@app.get("/api/today/{ticker}")
+async def today(ticker: str):
+    """Latest close and its move from the previous session, in every price unit."""
+    try:
+        raw = await store.get(_key(ticker), TODAY_MAX_AGE_SECONDS)
+    except Exception as exc:
+        raise HTTPException(502, f"no data for {ticker}: {exc}") from exc
+    closes = raw["c"].dropna()
+    if len(closes) < 2:
+        raise HTTPException(404, f"not enough data for {ticker}")
+    date, prev_date = closes.index[-1], closes.index[-2]
+    keys = list(denominators.DENOMINATORS)
+    series = await asyncio.gather(
+        *(denominators.series(k, TODAY_MAX_AGE_SECONDS) for k in keys), return_exceptions=True
+    )
+    moves = []
+    for key, denom in zip(keys, series):
+        move: dict = {"denominator": key, "label": denominators.DENOMINATORS[key].label}
+        if isinstance(denom, BaseException):
+            move["error"] = str(denom)
+        elif INDEX_DENOMINATOR.get(ticker.upper()) == key:
+            move["error"] = "the index against itself"
+        else:
+            day = denominators.apply(raw.loc[[prev_date, date]], denom)
+            if len(day) < 2:
+                move["error"] = "no data for these dates"
+            else:
+                move["change"] = float(day["c"].iloc[-1] / day["c"].iloc[-2] - 1)
+                if denom is not None:
+                    # An unpublished denominator for today gets carried forward, which would
+                    # silently report the nominal move as the move in that unit.
+                    denom_date = denom.dropna().index[-1]
+                    move["denominator_date"] = _iso(denom_date)
+                    move["stale"] = bool(denom_date < date)
+        moves.append(move)
+    return {
+        "ticker": ticker.upper(),
+        "date": _iso(date),
+        "previous_date": _iso(prev_date),
+        "price": float(closes.iloc[-1]),
+        "moves": moves,
+    }
+
+
 @app.get("/api/sigmas/{ticker}")
 async def sigmas(
     ticker: str,
@@ -297,6 +343,7 @@ async def leaderboard(
                 "ticker": ticker,
                 "last_date": _iso(last_date),
                 "price_ars": float(df["c"].iloc[-1]),
+                "day_change_ars": _day_change(df["c"]),
                 "value": last,
                 "changes": analytics.changes(deflated["c"]),
                 "z": t.z(last) if t else None,
@@ -317,6 +364,11 @@ async def leaderboard(
     }
     _leaderboards[params] = (ver, result)
     return result
+
+
+def _day_change(close: pd.Series) -> float | None:
+    close = close.dropna()
+    return float(close.iloc[-1] / close.iloc[-2] - 1) if len(close) > 1 else None
 
 
 @app.post("/api/refresh")

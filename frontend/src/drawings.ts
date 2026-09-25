@@ -1,30 +1,68 @@
 export type Anchor = { time: string; price: number }
-export type TrendLine = { id: number; a: Anchor; b: Anchor; extend: boolean; color: string }
+export type DrawingKind = 'trend' | 'hline'
+export type Drawing = {
+  id: number
+  kind?: DrawingKind
+  a: Anchor
+  b: Anchor
+  extend: boolean
+  color: string
+  width?: 1 | 2 | 3 | 4
+}
+/** Kept for lines saved before horizontal lines existed; they have no `kind`. */
+export type TrendLine = Drawing
+
+export type Tool = 'cursor' | 'trend' | 'hline' | 'measure' | 'pickStart' | 'pickEnd'
 
 const DAY_MS = 86_400_000
 
-function days(iso: string): number {
+export function days(iso: string): number {
   return Date.parse(iso) / DAY_MS
 }
 
+export function isoFromDays(d: number): string {
+  return new Date(Math.round(d) * DAY_MS).toISOString().slice(0, 10)
+}
+
 /**
- * Price of the line at each given bar time. Anchors are fixed (date, price) pairs; the path
- * between them is interpolated in the axis's own space so it renders straight on screen.
+ * Maps calendar dates to fractional bar indexes and back. Dates between bars interpolate, and
+ * dates past either end extrapolate at the average bar spacing, so anchors keep their date when
+ * the bar interval changes.
  */
-export function linePoints(line: TrendLine, times: string[], logAxis: boolean): { time: string; value: number }[] {
-  const [p, q] = line.a.time <= line.b.time ? [line.a, line.b] : [line.b, line.a]
-  const t0 = days(p.time)
-  const span = days(q.time) - t0
-  if (span <= 0) return []
-  const useLog = logAxis && p.price > 0 && q.price > 0
-  const y0 = useLog ? Math.log(p.price) : p.price
-  const y1 = useLog ? Math.log(q.price) : q.price
-  const out: { time: string; value: number }[] = []
-  for (const t of times) {
-    if (t < p.time || (!line.extend && t > q.time)) continue
-    const y = y0 + ((y1 - y0) * (days(t) - t0)) / span
-    const value = useLog ? Math.exp(y) : y
-    if (!logAxis || value > 0) out.push({ time: t, value })
+export class BarClock {
+  private readonly d: number[]
+  private readonly step: number
+
+  constructor(times: string[]) {
+    this.d = times.map(days)
+    const n = this.d.length
+    const k = Math.min(20, n - 1)
+    this.step = k > 0 ? (this.d[n - 1] - this.d[n - 1 - k]) / k : 1
   }
-  return out
+
+  logical(iso: string): number {
+    const d = this.d
+    const t = days(iso)
+    const n = d.length
+    if (n === 0) return 0
+    if (t <= d[0]) return (t - d[0]) / this.step
+    if (t >= d[n - 1]) return n - 1 + (t - d[n - 1]) / this.step
+    let lo = 0
+    let hi = n - 1
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1
+      if (d[mid] <= t) lo = mid
+      else hi = mid
+    }
+    return lo + (t - d[lo]) / (d[hi] - d[lo])
+  }
+
+  /** The date at a logical index; inside the data it snaps to the nearest bar. */
+  time(logical: number): string {
+    const d = this.d
+    const n = d.length
+    const i = Math.round(logical)
+    if (i >= 0 && i < n) return isoFromDays(d[i])
+    return isoFromDays(i < 0 ? d[0] + i * this.step : d[n - 1] + (i - n + 1) * this.step)
+  }
 }

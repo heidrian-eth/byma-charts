@@ -172,7 +172,6 @@ So:
   - **No login needed:** constructed without a username, it uses `unauthorized_user_token` just like this app.
   - **The `n_bars` default is 10:** its docstring claims a maximum of 5,000 bars, but daily requests return more (see §6).
   - It was tested in `tests/test_tradingview.py` and `tests/test_tvdatafeed_auth.py` (around 2026-08-27), where `n_bars=10000` reached 2004-09-17 for BCBA stocks and indices.
-  - **Security note:** `tests/test_tvdatafeed_auth.py` hardcodes a TradingView username in the source. The password is read from a temp file, not stored.
 - **`tradingview-datafeed`:** failed to import in the same tests.
 
 This app keeps its own ~80-line client rather than depending on those libraries, for three reasons: it needs asyncio, a hard timeout and incremental fetches (`n_bars` = 15), and a small library would be no less likely to break when the protocol changes.

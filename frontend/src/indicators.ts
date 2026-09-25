@@ -16,6 +16,7 @@ export type MaConfig = {
   color: string
   opacity?: number
   width?: 1 | 2 | 3 | 4
+  hidden?: boolean
 }
 
 export function isCentered(type: MaType): boolean {

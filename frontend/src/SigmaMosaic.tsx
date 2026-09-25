@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api, type FitMode, type Interval, type SigmaTile, type TrendModel } from './api'
 import { pct, sigmas } from './format'
 
-const SHORT: Record<string, string> = {
+export const SHORT_LABELS: Record<string, string> = {
   ars: 'Nominal pesos',
   ars_real: 'Constant pesos',
   usd_official: 'USD official',
@@ -58,7 +58,7 @@ export default function SigmaMosaic({ ticker, interval, fit, start, end, model, 
             title={t.error ?? `${t.label}: ${t.model === 'bands' ? 'centered bands' : `${t.model === 'mean' ? 'flat mean' : 'regression'} ${t.start} → ${t.end}`}`}
           >
             <span className="tile-label">
-              {SHORT[t.denominator] ?? t.label}
+              {SHORT_LABELS[t.denominator] ?? t.label}
               {t.model === 'bands' && <span title="Centered bands"> ≈</span>}
             </span>
             {t.z !== undefined ? (

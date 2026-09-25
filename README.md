@@ -11,6 +11,7 @@ You'll need `uv` and `pnpm`.
 Pages always read from the local cache (`backend/data.sqlite3`, kept in memory), so they never wait on the network:
 
 - **Updates are incremental.** Every 15 minutes, and whenever a series you open is more than 30 minutes old, the backend fetches only the last ~3 weeks, today's bar included, and merges them into the cache.
+- **The details panel** (today's moves) is stricter: when you open or reload a chart, any price it uses that is more than **5 minutes** old is fetched before it answers. That takes about 3–4 seconds when stale and is instant otherwise; the chart itself still draws straight from the cache.
 - **Monthly CPIs** refresh daily.
 - **Refresh data** runs an update right away. `POST /api/refresh?full=true` re-downloads everything from scratch.
 - **Only a series that has never been downloaded** blocks on a full fetch.
@@ -31,24 +32,34 @@ Pages always read from the local cache (`backend/data.sqlite3`, kept in memory),
   - top gainers and losers over 1m, 3m, 6m, 1y, 3y or 5y
   - the stocks furthest above and below their regression trend, measured in sigmas
   - a sortable table of every stock
-- **Chart:**
-  - candles or line, with daily, weekly or monthly bars; light, dark or system theme
-  - **%** and **x** toggles that relabel the price axis relative to the latest price: as a percentage (latest = 100%) or as a multiple (2x above it, 1/2x below it)
-  - a trend with 1/2/3σ bands, from one of two models:
-    - **Regression:** one straight trend over a window you set with presets, date fields, or by clicking the chart.
-    - **Flat mean:** a horizontal line at the window's average (geometric on Log), with its standard deviation. No trend is assumed.
+- **Chart page**, laid out like TradingView:
+  - **Header:** symbol search (click it, or just start typing), 1D / 1W / 1M bars, chart type (bars, candles, hollow candles, line, area), Indicators, the price unit, the trend model, dark mode, and a PNG snapshot. The ☰ menu has the leaderboard, a full data refresh and the theme.
+  - **Legend** over the chart: symbol, interval and unit, then open/high/low/close and the bar's change, following the crosshair. Below it, one row per indicator with its value at the crosshair; hover a row to hide it, open its settings or remove it.
+  - **Left toolbar:**
+    - trend line (Alt+T)
+    - horizontal line (Alt+H), labelled on the price axis
+    - measure (or Shift+click): % change, bars, time span and annualised growth between two points
+    - magnet, which snaps anchors to the bar's open, high, low or close
+    - hide all drawings, remove all drawings
+    Click a line to select it, drag its ends or its body, and press Delete to remove it. Lines are saved per stock and price unit as (date, price) anchors, so they stay put when you switch scale or bar interval. Esc cancels any tool.
+  - **Bottom bar:** visible range (6M to 20Y, or All; Alt+R reapplies it), a clock, and the axis toggles:
+    - **%** and **x** relabel the price axis relative to the latest price: as a percentage (latest = 100%) or as a multiple (2x above it, 1/2x below it)
+    - **log** switches both the price axis and the trend fit, so a linear fit is never drawn on a log axis
+    - **auto** refits the price axis after you've dragged it
+  - **Right panels**, picked from the icon rail on the far right (click the active icon to hide the panel):
+    - **Watchlist and details:** every symbol with its last peso price, today's move and its σ distance from trend in the current unit (sortable), indices first. Below it, the current symbol's last close and move, its move today in each of the eight units, and its performance tiles (1M–5Y) in the current unit. An asterisk marks a unit with no value for today yet, such as the official dollar before BCRA publishes, whose move would otherwise just repeat the peso move.
+    - **Trend channel:** distance from trend, trend growth and σ width; the model, which σ bands to draw, and the fit window (presets, dates, or click the chart). Below it, the distance-from-trend mosaic: the stock's σ distance in all eight units at once; click a tile to switch to that unit.
+    - **Object tree:** every indicator and drawing, with visibility, settings, color and remove.
+  - **Trend models**, each with 1/2/3σ bands:
+    - **Regression:** one straight trend over the fit window.
+    - **Flat mean:** a horizontal line at the window's average (geometric on log), with its standard deviation. No trend is assumed.
     - **Centered bands:** Bollinger bands whose mean and σ come from a 1–5 year window centered on each bar. The last half-window only has past data, so it's drawn faded and will move as new bars arrive.
-    - **Auto** (the default) uses centered bands for nominal pesos, because inflation bends their long-run path so no single straight line fits, and regression for every other unit. The leaderboard and the sigma mosaic follow the same setting.
-  - SMA, EMA and moving-median averages, each with its own color, opacity and line width
-  - centered versions of all three, which have no lag. Near the latest bar a centered average has less future data to use, so that stretch is drawn dotted and will change as new bars arrive:
+    - **Auto** (the default) uses centered bands for nominal pesos, because inflation bends their long-run path so no single straight line fits, and regression for every other unit. The leaderboard, watchlist and sigma mosaic follow the same setting.
+  - **Indicators:** SMA, EMA and moving median, plus centered versions of all three, which have no lag; each has its own length, color, opacity and thickness. Near the latest bar a centered average has less future data to use, so that stretch is drawn dotted and will change as new bars arrive:
     - centered SMA and median shrink their window to the bars that exist
     - centered EMA runs forward and then backward, with the series mirrored past its ends
-  - two-point lines
-  - a distance-from-trend mosaic showing the stock's sigma distance under all eight price units at once, over the same window; click a tile to switch to that unit
-- **Log / Linear** is one switch. It sets both the price axis and the regression fit, so a linear fit is never drawn on a log axis.
-- **Two-point lines** are saved per stock and price unit as (date, price) anchors. They stay put when you switch scale or bar interval.
 
-Per-view settings live in the browser's localStorage: channel windows, lines and averages.
+Settings live in the browser's localStorage: fit window, drawings, indicators, panel and range.
 
 ## Data sources
 
@@ -94,9 +105,12 @@ backend/app/
   store.py         SQLite-cached named series ("stock:GGAL", "yahoo:^MERV", "macro:cpi", ...)
   denominators.py  what prices can be divided by
   analytics.py     resampling, regression channel, period changes
-  main.py          FastAPI routes: /api/meta, /api/chart/{ticker}, /api/sigmas/{ticker}, /api/leaderboard, /api/refresh
+  main.py          FastAPI routes: /api/meta, /api/chart/{ticker}, /api/today/{ticker}, /api/sigmas/{ticker}, /api/leaderboard, /api/refresh
 frontend/src/
-  LeaderboardView.tsx, ChartView.tsx, PriceChart.tsx (lightweight-charts), drawings.ts, indicators.ts
+  ChartView.tsx     chart page layout: header, toolbars, panels, dialogs
+  PriceChart.tsx    lightweight-charts series, legend and drawing-tool mouse handling
+  drawingLayer.ts   canvas plugin that draws lines, handles and the measure box
+  Watchlist.tsx, TodayPanel.tsx, TrendPanel.tsx, ObjectsPanel.tsx, dialogs.tsx, LeaderboardView.tsx
 ```
 
 Tests: `cd backend && uv run pytest`.

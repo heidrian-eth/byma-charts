@@ -39,6 +39,7 @@ export type LeaderRow = {
   ticker: string
   last_date: string
   price_ars: number
+  day_change_ars: number | null
   value: number
   changes: Changes
   z: number | null
@@ -63,6 +64,17 @@ export type SigmaTile = {
   error?: string
 }
 
+export type TodayMove = {
+  denominator: string
+  label: string
+  change?: number
+  denominator_date?: string
+  stale?: boolean
+  error?: string
+}
+
+export type Today = { ticker: string; date: string; previous_date: string; price: number; moves: TodayMove[] }
+
 export type Interval = 'd' | 'w' | 'm'
 export type FitMode = 'log' | 'lin'
 
@@ -81,6 +93,7 @@ export const api = {
   meta: () => get<Meta>('/meta'),
   chart: (ticker: string, p: { denom: string; interval: Interval; fit: FitMode; start?: string; end?: string; model: TrendModel; band_years: number }) =>
     get<ChartData>(`/chart/${ticker}`, p),
+  today: (ticker: string) => get<Today>(`/today/${ticker}`),
   sigmas: (ticker: string, p: { interval: Interval; fit: FitMode; start?: string; end?: string; model: TrendModel; band_years: number }) =>
     get<{ ticker: string; tiles: SigmaTile[] }>(`/sigmas/${ticker}`, p),
   leaderboard: (p: { denom: string; trend_years: number; fit: FitMode; model: TrendModel; band_years: number }) => get<Leaderboard>('/leaderboard', p),

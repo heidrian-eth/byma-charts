@@ -1,64 +1,96 @@
-import { useEffect, useMemo, useState } from 'react'
-import { api, type ChartData, type Interval, type Meta } from './api'
+import type { IChartApi } from 'lightweight-charts'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { api, type ChartData, type Interval, type LeaderRow, type Meta } from './api'
 import type { Shared } from './App'
-import Controls, { BAND_YEARS, TREND_MODELS } from './Controls'
-import { num, pct, sigmas, tone } from './format'
-import type { Anchor, TrendLine } from './drawings'
-import { MA_TYPES, type MaConfig, type MaType } from './indicators'
-import { ZGauge } from './LeaderboardView'
+import { TREND_MODELS } from './Controls'
+import { IndicatorsDialog, MaSettings, SymbolSearch, type IndicatorChoice } from './dialogs'
+import type { Anchor, Drawing, Tool } from './drawings'
+import { Icon } from './icons'
+import type { MaConfig } from './indicators'
+import ObjectsPanel from './ObjectsPanel'
 import { readStored, usePersisted, writeStored } from './persist'
-import SigmaMosaic from './SigmaMosaic'
-import PriceChart, { type AxisLabel, type ChartOptions } from './PriceChart'
+import PriceChart, { RANGES, type AxisLabel, type ChartOptions, type ChartType, type LegendAction, type RangeKey } from './PriceChart'
+import { SHORT_LABELS } from './SigmaMosaic'
+import TodayPanel from './TodayPanel'
+import TrendPanel, { type Window } from './TrendPanel'
+import { Dropdown, MenuItem } from './ui'
+import Watchlist from './Watchlist'
 
-type Window = { start?: string; end?: string }
-const WINDOW_PRESETS = [3, 5, 10, 15, 20]
+type Panel = 'watchlist' | 'trend' | 'objects' | null
+
 const MA_COLORS = ['#ff9800', '#ab47bc', '#26c6da', '#8d6e63', '#ec407a']
-const LINE_COLORS = ['#00bcd4', '#e91e63', '#8bc34a', '#ff5722', '#9c27b0']
+const LINE_COLORS = ['#e91e63', '#00bcd4', '#4caf50', '#ff5722', '#9c27b0']
 const DEFAULT_MAS: MaConfig[] = [
   { id: 1, type: 'SMA', period: 10, color: MA_COLORS[0] },
   { id: 2, type: 'SMA', period: 40, color: MA_COLORS[1] },
 ]
+const INTERVALS: { value: Interval; label: string; long: string }[] = [
+  { value: 'd', label: '1D', long: '1 day' },
+  { value: 'w', label: '1W', long: '1 week' },
+  { value: 'm', label: '1M', long: '1 month' },
+]
+const CHART_TYPES: { value: ChartType; label: string }[] = [
+  { value: 'bars', label: 'Bars' },
+  { value: 'candles', label: 'Candles' },
+  { value: 'hollow', label: 'Hollow candles' },
+  { value: 'line', label: 'Line' },
+  { value: 'area', label: 'Area' },
+]
+const TYPE_ICON: Record<ChartType, React.ReactNode> = {
+  candles: Icon.candles, hollow: Icon.hollow, bars: Icon.bars, line: Icon.line, area: Icon.area,
+}
+const TOOLS: { tool: Tool; icon: React.ReactNode; label: string; key?: string }[] = [
+  { tool: 'cursor', icon: Icon.cross, label: 'Cross' },
+  { tool: 'trend', icon: Icon.trend, label: 'Trend line', key: 'Alt+T' },
+  { tool: 'hline', icon: Icon.hline, label: 'Horizontal line', key: 'Alt+H' },
+  { tool: 'measure', icon: Icon.ruler, label: 'Measure', key: 'Shift+click' },
+]
 
-function yearsAgo(years: number): string {
-  const d = new Date()
-  d.setFullYear(d.getFullYear() - years)
-  return d.toISOString().slice(0, 10)
+function useClock(): string {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000)
+    return () => clearInterval(t)
+  }, [])
+  const offset = -now.getTimezoneOffset() / 60
+  return `${now.toLocaleTimeString('en-GB')} UTC${offset >= 0 ? '+' : ''}${offset}`
 }
 
 export default function ChartView({ meta, ticker, shared }: { meta: Meta; ticker: string; shared: Shared }) {
-  const { theme } = shared
-  const { denom, fit, setFit, trendModel, bandYears } = shared
-  const usesBands = trendModel === 'bands' || (trendModel === 'auto' && denom === 'ars')
+  const { theme, denom, fit, setFit, trendModel, bandYears } = shared
   const logAxis = fit === 'log'
-  const linesKey = `lines:${ticker}:${denom}`
+  const drawingsKey = `lines:${ticker}:${denom}`
   // One window for every stock and unit, so switching charts keeps the same comparison period.
   const [win, setWin] = usePersisted<Window>('channelWindow', {})
   const [interval, setBarInterval] = usePersisted<Interval>('interval', 'w')
-  const [candles, setCandles] = usePersisted('candles', true)
+  const [chartType, setChartType] = usePersisted<ChartType>('chartType', readStored('candles', true) ? 'candles' : 'line')
   const [showVolume, setShowVolume] = usePersisted('showVolume', false)
   const [axisLabel, setAxisLabel] = usePersisted<AxisLabel>('axisLabel', 'price')
-  const toggleAxis = (mode: AxisLabel) => setAxisLabel(axisLabel === mode ? 'price' : mode)
   const [showChannel, setShowChannel] = usePersisted('showChannel', true)
   const [sigmaLevels, setSigmaLevels] = usePersisted('sigmaLevels', [1, 2, 3])
   const [mas, setMas] = usePersisted<MaConfig[]>('mas', DEFAULT_MAS)
-  const [picking, setPicking] = useState<'start' | 'end' | 'line' | null>(null)
-  const [pending, setPending] = useState<Anchor | null>(null)
-  const [lines, setLines] = useState<TrendLine[]>(() => readStored(linesKey, []))
+  const [panel, setPanel] = usePersisted<Panel>('panel', 'watchlist')
+  const [range, setRange] = usePersisted<RangeKey>('range', 'all')
+  const [rangeNonce, setRangeNonce] = useState(0)
+  const [magnet, setMagnet] = usePersisted('magnet', false)
+  const [drawingsHidden, setDrawingsHidden] = useState(false)
+  const [tool, setTool] = useState<Tool>('cursor')
+  const [drawings, setDrawingsState] = useState<Drawing[]>(() => readStored(drawingsKey, []))
   const [data, setData] = useState<ChartData | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [tickerInput, setTickerInput] = useState(ticker)
+  const [rows, setRows] = useState<LeaderRow[] | null>(null)
+  const [rowsError, setRowsError] = useState<string | null>(null)
+  const [search, setSearch] = useState<string | null>(null)
+  const [dialog, setDialog] = useState<'indicators' | { ma: number } | null>(null)
+  const [autoScale, setAutoScale] = useState(true)
+  const chartApi = useRef<IChartApi | null>(null)
+  const clock = useClock()
 
-  useEffect(() => {
-    setLines(readStored(linesKey, []))
-    setPending(null)
-  }, [linesKey])
-
-  const saveLines = (next: TrendLine[]) => {
-    setLines(next)
-    writeStored(linesKey, next)
-  }
-
-  const updateWin = setWin
+  useEffect(() => setDrawingsState(readStored(drawingsKey, [])), [drawingsKey])
+  const setDrawings = useCallback((next: Drawing[]) => {
+    setDrawingsState(next)
+    writeStored(drawingsKey, next)
+  }, [drawingsKey])
 
   useEffect(() => {
     let alive = true
@@ -71,289 +103,285 @@ export default function ChartView({ meta, ticker, shared }: { meta: Meta; ticker
     }
   }, [ticker, denom, interval, fit, win.start, win.end, trendModel, bandYears])
 
-  const options: ChartOptions = useMemo(
-    () => ({ candles, logAxis, showVolume, axisLabel, sigmaLevels, mas, lines, pending }),
-    [candles, logAxis, showVolume, axisLabel, sigmaLevels, mas, lines, pending],
-  )
-  const shown = useMemo(
-    () => (data && !showChannel ? { ...data, channel: null } : data),
-    [data, showChannel],
-  )
-
-  const onPick = (anchor: Anchor) => {
-    if (picking === 'line') {
-      if (!pending) return setPending(anchor)
-      const id = Math.max(0, ...lines.map((l) => l.id)) + 1
-      saveLines([...lines, { id, a: pending, b: anchor, extend: false, color: LINE_COLORS[lines.length % LINE_COLORS.length] }])
-      setPending(null)
-      setPicking(null)
-      return
+  useEffect(() => {
+    let alive = true
+    api
+      .leaderboard({ denom, trend_years: shared.trendYears, fit, model: trendModel, band_years: bandYears })
+      .then((d) => alive && (setRows(d.rows), setRowsError(null)), (e: Error) => alive && setRowsError(e.message))
+    return () => {
+      alive = false
     }
-    if (picking === 'start') updateWin({ ...win, start: anchor.time })
-    if (picking === 'end') updateWin({ ...win, end: anchor.time })
-    setPicking(null)
-  }
+  }, [denom, shared.trendYears, fit, trendModel, bandYears])
 
-  const toggleDraw = () => {
-    setPending(null)
-    setPicking(picking === 'line' ? null : 'line')
-  }
+  const go = useCallback((t: string) => {
+    const clean = t.trim().toUpperCase()
+    setSearch(null)
+    if (clean) window.location.hash = `#/chart/${clean}`
+  }, [])
 
+  // TradingView habits: typing a letter opens symbol search; Alt+T / Alt+H pick drawing tools.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setPicking(null)
-        setPending(null)
+      const target = e.target as HTMLElement
+      if (target.closest('input, select, textarea, .overlay')) return
+      if (e.altKey && e.code === 'KeyT') setTool('trend')
+      else if (e.altKey && e.code === 'KeyH') setTool('hline')
+      else if (e.altKey && e.code === 'KeyR') setRangeNonce((n) => n + 1)
+      else if (e.key === 'Escape') setTool('cursor')
+      else if (!e.ctrlKey && !e.metaKey && !e.altKey && /^[a-zA-Z]$/.test(e.key)) {
+        setSearch(e.key.toUpperCase())
+        e.preventDefault()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  const go = (t: string) => {
-    const clean = t.trim().toUpperCase()
-    if (clean) window.location.hash = `#/chart/${clean}`
+  const options: ChartOptions = useMemo(
+    () => ({ chartType, logAxis, showVolume, showChannel, axisLabel, sigmaLevels, mas }),
+    [chartType, logAxis, showVolume, showChannel, axisLabel, sigmaLevels, mas],
+  )
+
+  const onPick = useCallback((t: 'pickStart' | 'pickEnd', a: Anchor) => {
+    setWin(t === 'pickStart' ? { ...win, start: a.time } : { ...win, end: a.time })
+    setTool('cursor')
+  }, [win, setWin])
+
+  const updateMa = (id: number, patch: Partial<MaConfig>) => setMas(mas.map((m) => (m.id === id ? { ...m, ...patch } : m)))
+
+  const onLegend = (a: LegendAction) => {
+    if (a.kind === 'ma') {
+      if (a.action === 'toggle') updateMa(a.id, { hidden: !mas.find((m) => m.id === a.id)?.hidden })
+      if (a.action === 'remove') setMas(mas.filter((m) => m.id !== a.id))
+      if (a.action === 'settings') setDialog({ ma: a.id })
+    } else if (a.kind === 'channel') {
+      if (a.action === 'toggle') setShowChannel(!showChannel)
+      if (a.action === 'settings') setPanel('trend')
+    } else if (a.action === 'toggle' || a.action === 'remove') setShowVolume(false)
   }
 
-  const updateMa = (id: number, patch: Partial<MaConfig>) =>
-    setMas(mas.map((m) => (m.id === id ? { ...m, ...patch } : m)))
-  const addMa = () => {
-    const id = Math.max(0, ...mas.map((m) => m.id)) + 1
-    setMas([...mas, { id, type: 'SMA', period: 20, color: MA_COLORS[mas.length % MA_COLORS.length] }])
+  const addIndicator = (c: IndicatorChoice) => {
+    if (c.kind === 'channel') setShowChannel(true)
+    else if (c.kind === 'volume') setShowVolume(true)
+    else {
+      const id = Math.max(0, ...mas.map((m) => m.id)) + 1
+      setMas([...mas, { id, type: c.type, period: 20, color: MA_COLORS[mas.length % MA_COLORS.length] }])
+    }
+    setDialog(null)
   }
 
+  const screenshot = () => {
+    const canvas = chartApi.current?.takeScreenshot()
+    if (!canvas) return
+    const a = document.createElement('a')
+    a.href = canvas.toDataURL('image/png')
+    a.download = `${ticker}-${denom}-${new Date().toISOString().slice(0, 10)}.png`
+    a.click()
+  }
+
+  const resetScale = () => {
+    chartApi.current?.priceScale('right').applyOptions({ autoScale: true })
+    setAutoScale(true)
+  }
+
+  const unitLabel = meta.denominators.find((d) => d.key === denom)?.label ?? denom
+  const intervalInfo = INTERVALS.find((i) => i.value === interval)!
   const ch = data?.channel
-  const denomLabel = meta.denominators.find((d) => d.key === denom)?.label ?? denom
+  const modelLabel = ch ? { regression: 'Regression', mean: 'Flat mean', bands: 'Centered bands' }[ch.model] : ''
+  const channelLabel = ch
+    ? `${modelLabel} · ${logAxis ? 'log' : 'linear'} · ${ch.model === 'bands' ? `${bandYears}y window` : `${ch.start.slice(0, 4)}–${ch.end.slice(0, 4)}`}`
+    : ''
+  const maDialog = dialog && typeof dialog === 'object' ? mas.find((m) => m.id === dialog.ma) : undefined
+  const togglePanel = (p: Panel) => setPanel(panel === p ? null : p)
 
   return (
-    <main className="page chart-page">
-      <div className="toolbar">
-        <form onSubmit={(e) => (e.preventDefault(), go(tickerInput))}>
-          <input
-            className="ticker-input"
-            list="tickers"
-            value={tickerInput}
-            onChange={(e) => setTickerInput(e.target.value)}
-            onBlur={() => tickerInput !== ticker && go(tickerInput)}
-            aria-label="Ticker"
-          />
-          <datalist id="tickers">
-            {meta.tickers.map((t) => <option key={t} value={t} />)}
-          </datalist>
-        </form>
-        <Controls meta={meta} shared={shared} showFit={false} />
-        <div className="seg" role="group" aria-label="Interval">
-          {(['d', 'w', 'm'] as Interval[]).map((i) => (
-            <button key={i} className={interval === i ? 'on' : ''} onClick={() => setBarInterval(i)}>
-              {{ d: 'Daily', w: 'Weekly', m: 'Monthly' }[i]}
-            </button>
-          ))}
-        </div>
-        <div className="seg" role="group">
-          <button className={candles ? 'on' : ''} onClick={() => setCandles(true)}>Candles</button>
-          <button className={!candles ? 'on' : ''} onClick={() => setCandles(false)}>Line</button>
-        </div>
-        <div className="seg" role="group" title="Sets both the price axis and the regression fit">
-          <button className={logAxis ? 'on' : ''} onClick={() => setFit('log')}>Log</button>
-          <button className={!logAxis ? 'on' : ''} onClick={() => setFit('lin')}>Linear</button>
-        </div>
-        <div className="seg" role="group" aria-label="Axis labels">
-          <button
-            className={axisLabel === 'pct' ? 'on' : ''}
-            onClick={() => toggleAxis('pct')}
-            title="Label the price axis as % of the latest price (latest = 100%)"
-          >
-            %
-          </button>
-          <button
-            className={axisLabel === 'x' ? 'on' : ''}
-            onClick={() => toggleAxis('x')}
-            title="Label the price axis as multiples of the latest price: 2x above, 1/2x below"
-          >
-            x
-          </button>
-        </div>
-        <button className={`ghost ${picking === 'line' ? 'on' : ''}`} onClick={toggleDraw} title="Click two points on the chart">
-          ╱ Draw line
+    <div className={`tv ${panel ? '' : 'no-panel'}`}>
+      <header className="tv-header">
+        <Dropdown label={Icon.menu} title="Menu" className="menu-btn" caret={false}>
+          {(close) => (
+            <>
+              <MenuItem icon={Icon.trophy} onClick={() => ((window.location.hash = '#/'), close())}>Leaderboard</MenuItem>
+              <MenuItem icon={Icon.refresh} onClick={() => (shared.refresh(), close())}>
+                {shared.refreshing ? 'Refreshing…' : 'Refresh all data'}
+              </MenuItem>
+              <div className="menu-sep" />
+              <div className="menu-caption">Theme</div>
+              {(['system', 'light', 'dark'] as const).map((t) => (
+                <MenuItem key={t} active={shared.themeChoice === t} onClick={() => (shared.setThemeChoice(t), close())}>
+                  {t[0].toUpperCase() + t.slice(1)}
+                </MenuItem>
+              ))}
+            </>
+          )}
+        </Dropdown>
+        <button className="tb symbol" onClick={() => setSearch('')} title="Symbol search (or just start typing)">
+          {Icon.search}
+          <span>{ticker}</span>
         </button>
-        <label className="check"><input type="checkbox" checked={showVolume} onChange={(e) => setShowVolume(e.target.checked)} />Volume</label>
-      </div>
+        <span className="tb-sep" />
+        {INTERVALS.map((i) => (
+          <button key={i.value} className={`tb text ${interval === i.value ? 'on' : ''}`} onClick={() => setBarInterval(i.value)} title={i.long}>
+            {i.label}
+          </button>
+        ))}
+        <span className="tb-sep" />
+        <Dropdown label={TYPE_ICON[chartType]} title="Chart type">
+          {(close) => CHART_TYPES.map((t) => (
+            <MenuItem key={t.value} icon={TYPE_ICON[t.value]} active={chartType === t.value} onClick={() => (setChartType(t.value), close())}>
+              {t.label}
+            </MenuItem>
+          ))}
+        </Dropdown>
+        <span className="tb-sep" />
+        <button className="tb" onClick={() => setDialog('indicators')} title="Indicators">
+          {Icon.indicators}
+          <span>Indicators</span>
+        </button>
+        <span className="tb-sep" />
+        <Dropdown label={<span className="tb-label"><span className="muted">Price in</span> {unitLabel}</span>} title="Price unit">
+          {(close) => meta.denominators.map((d) => (
+            <MenuItem key={d.key} active={denom === d.key} onClick={() => (shared.setDenom(d.key), close())}>{d.label}</MenuItem>
+          ))}
+        </Dropdown>
+        <Dropdown label={<span className="tb-label"><span className="muted">Trend</span> {TREND_MODELS.find((m) => m.value === trendModel)?.label}</span>} title="Trend model">
+          {(close) => TREND_MODELS.map((m) => (
+            <MenuItem key={m.value} active={trendModel === m.value} onClick={() => (shared.setTrendModel(m.value), close())} hint={m.hint}>
+              {m.label}
+            </MenuItem>
+          ))}
+        </Dropdown>
+        <span className="tb-grow" />
+        <button className="tb" onClick={() => shared.setThemeChoice(theme === 'dark' ? 'light' : 'dark')} title="Toggle dark mode">
+          {theme === 'dark' ? Icon.sun : Icon.moon}
+        </button>
+        <button className="tb" onClick={screenshot} title="Download a snapshot of the chart">{Icon.camera}</button>
+      </header>
 
-      <div className="chart-layout">
-        <div className={`chart-box ${picking ? 'picking' : ''}`}>
-          {error && <div className="error">{error}</div>}
-          {picking && (
-            <div className="pick-hint">
-              {picking === 'line'
-                ? pending ? 'Click the second point (Esc to cancel)' : 'Click the first point (Esc to cancel)'
-                : `Click the chart to set the channel ${picking}`}
+      <nav className="tv-tools" aria-label="Drawing tools">
+        {TOOLS.map((t) => (
+          <button
+            key={t.tool}
+            className={`tool ${tool === t.tool ? 'on' : ''}`}
+            onClick={() => setTool(tool === t.tool && t.tool !== 'cursor' ? 'cursor' : t.tool)}
+            title={t.key ? `${t.label} (${t.key})` : t.label}
+          >
+            {t.icon}
+          </button>
+        ))}
+        <span className="tool-sep" />
+        <button className={`tool ${magnet ? 'on' : ''}`} onClick={() => setMagnet(!magnet)} title="Magnet: snap drawings to open, high, low or close">{Icon.magnet}</button>
+        <button className={`tool ${drawingsHidden ? 'on' : ''}`} onClick={() => setDrawingsHidden(!drawingsHidden)} title={drawingsHidden ? 'Show drawings' : 'Hide drawings'}>
+          {drawingsHidden ? Icon.eyeOff : Icon.eye}
+        </button>
+        <button
+          className="tool"
+          onClick={() => drawings.length > 0 && window.confirm(`Remove ${drawings.length} drawing(s) from ${ticker}?`) && setDrawings([])}
+          title="Remove all drawings"
+        >
+          {Icon.trash}
+        </button>
+      </nav>
+
+      <main className={`tv-chart ${tool !== 'cursor' ? 'drawing' : ''}`} onMouseUp={() => setAutoScale(chartApi.current?.priceScale('right').options().autoScale ?? true)}>
+        {error && <div className="error">{error}</div>}
+        {(tool === 'pickStart' || tool === 'pickEnd') && (
+          <div className="pick-hint">Click the chart to set the fit window {tool === 'pickStart' ? 'start' : 'end'} (Esc to cancel)</div>
+        )}
+        {data && (
+          <PriceChart
+            data={data}
+            options={options}
+            theme={theme}
+            legend={{ title: ticker, interval: intervalInfo.label, unit: unitLabel, channel: channelLabel }}
+            range={range}
+            rangeNonce={rangeNonce}
+            onLegend={onLegend}
+            onReady={(a) => (chartApi.current = a)}
+            draw={{
+              drawings, hidden: drawingsHidden, tool, magnet,
+              onChange: setDrawings,
+              onToolDone: () => setTool('cursor'),
+              onPick,
+              nextColor: LINE_COLORS[drawings.length % LINE_COLORS.length],
+            }}
+          />
+        )}
+        {!data && !error && <div className="loading">Loading {ticker}…</div>}
+      </main>
+
+      <footer className="tv-bottom">
+        {RANGES.map((r) => (
+          <button key={r.key} className={`tb text small ${range === r.key ? 'on' : ''}`} onClick={() => (setRange(r.key), setRangeNonce((n) => n + 1))} title={r.years ? `Show the last ${r.label}` : 'Show all history'}>
+            {r.label}
+          </button>
+        ))}
+        <span className="tb-grow" />
+        <span className="clock">{clock}</span>
+        <span className="tb-sep" />
+        <button className={`tb text small ${axisLabel === 'pct' ? 'on' : ''}`} onClick={() => setAxisLabel(axisLabel === 'pct' ? 'price' : 'pct')} title="Label the price axis as % of the latest price (latest = 100%)">%</button>
+        <button className={`tb text small ${axisLabel === 'x' ? 'on' : ''}`} onClick={() => setAxisLabel(axisLabel === 'x' ? 'price' : 'x')} title="Label the price axis as multiples of the latest price: 2x above, 1/2x below">x</button>
+        <button className={`tb text small ${logAxis ? 'on' : ''}`} onClick={() => setFit(logAxis ? 'lin' : 'log')} title="Log scale; also fits the trend in log terms">log</button>
+        <button className={`tb text small ${autoScale ? 'on' : ''}`} onClick={resetScale} title="Fit the price axis to the visible bars">auto</button>
+      </footer>
+
+      {panel && (
+        <aside className="tv-panel">
+          {panel === 'watchlist' && (
+            <div className="split">
+              <Watchlist rows={rows} indices={meta.indices} current={ticker} error={rowsError} />
+              <TodayPanel
+                ticker={ticker}
+                isIndex={meta.indices.includes(ticker)}
+                current={denom}
+                onSelect={shared.setDenom}
+                changes={data?.changes ?? null}
+                unitLabel={SHORT_LABELS[denom] ?? unitLabel}
+              />
             </div>
           )}
-          {shown && <PriceChart data={shown} options={options} theme={theme} onPick={picking ? onPick : undefined} />}
-          {!shown && !error && <div className="loading">Loading {ticker}…</div>}
-        </div>
-
-        <aside className="side">
-          <section>
-            <h3>{ticker} <span className="muted">· {denomLabel}</span></h3>
-            {data && (
-              <div className="stat-grid">
-                {Object.entries(data.changes).map(([p, v]) => (
-                  <div key={p}><span className="muted">{p}</span><b className={tone(v)}>{pct(v)}</b></div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <SigmaMosaic
-            ticker={ticker}
-            interval={interval}
-            fit={fit}
-            start={win.start}
-            end={win.end}
-            model={trendModel}
-            bandYears={bandYears}
-            current={denom}
-            onSelect={shared.setDenom}
-          />
-
-          <section>
-            <h4>
-              <label className="check"><input type="checkbox" checked={showChannel} onChange={(e) => setShowChannel(e.target.checked)} />{usesBands ? 'Centered bands' : trendModel === 'mean' ? 'Flat mean' : 'Regression channel'}</label>
-            </h4>
-            {ch ? (
-              <>
-                <ZGauge z={ch.z} />
-                <dl className="facts">
-                  <dt>Last vs trend</dt><dd className={tone(ch.pct_from_trend)}>{pct(ch.pct_from_trend)} ({sigmas(ch.z)})</dd>
-                  {ch.annual_growth !== null && (<><dt>Trend growth</dt><dd className={tone(ch.annual_growth)}>{pct(ch.annual_growth)} / yr</dd></>)}
-                  <dt>1σ width</dt><dd>{fit === 'log' ? `±${pct(Math.exp(ch.sigma) - 1).slice(1)}` : `±${num(ch.sigma)}`}</dd>
-                  {ch.model !== 'bands' ? (
-                    <><dt>{ch.model === 'mean' ? 'Averaged over' : 'Fitted on'}</dt><dd>{ch.start} → {ch.end}</dd></>
-                  ) : (
-                    <><dt>Provisional from</dt><dd>{ch.provisional_from}</dd></>
-                  )}
-                </dl>
-              </>
-            ) : (
-              <p className="muted">Not enough data in the window.</p>
-            )}
-            <div className="seg small">
-              {[1, 2, 3].map((k) => (
-                <button
-                  key={k}
-                  className={sigmaLevels.includes(k) ? 'on' : ''}
-                  onClick={() => setSigmaLevels(sigmaLevels.includes(k) ? sigmaLevels.filter((x) => x !== k) : [...sigmaLevels, k].sort())}
-                >
-                  {k}σ
-                </button>
-              ))}
-            </div>
-            <div className="seg small model-seg" role="group" aria-label="Trend model">
-              {TREND_MODELS.map((m) => (
-                <button key={m.value} className={trendModel === m.value ? 'on' : ''} onClick={() => shared.setTrendModel(m.value)} title={m.hint}>
-                  {m.label}
-                </button>
-              ))}
-            </div>
-            {usesBands ? (
-              <>
-                <div className="presets">
-                  {BAND_YEARS.map((y) => (
-                    <button key={y} className={`ghost ${bandYears === y ? 'on' : ''}`} onClick={() => shared.setBandYears(y)}>{y}y window</button>
-                  ))}
-                </div>
-                <p className="hint">Mean and σ over a window centered on each bar. The last half-window only has past data, so it's drawn faded and will move as new bars arrive.</p>
-              </>
-            ) : (
-            <>
-            <div className="presets">
-              {WINDOW_PRESETS.map((y) => (
-                <button key={y} className="ghost" onClick={() => updateWin({ start: yearsAgo(y) })}>{y}y</button>
-              ))}
-              <button className="ghost" onClick={() => updateWin({})}>All</button>
-            </div>
-            <div className="window-inputs">
-              <label>
-                From
-                <input type="date" value={win.start ?? ''} onChange={(e) => updateWin({ ...win, start: e.target.value || undefined })} />
-              </label>
-              <button className={`ghost ${picking === 'start' ? 'on' : ''}`} onClick={() => setPicking(picking === 'start' ? null : 'start')} title="Pick on chart">⌖</button>
-              <label>
-                To
-                <input type="date" value={win.end ?? ''} onChange={(e) => updateWin({ ...win, end: e.target.value || undefined })} />
-              </label>
-              <button className={`ghost ${picking === 'end' ? 'on' : ''}`} onClick={() => setPicking(picking === 'end' ? null : 'end')} title="Pick on chart">⌖</button>
-            </div>
-            <p className="hint">Empty "To" means up to today. Lines extend past "To" so you can see where price went after the fit.</p>
-            </>
-            )}
-          </section>
-
-          <section>
-            <h4>Lines</h4>
-            {lines.length === 0 && <p className="hint">Use "Draw line" and click two points. Lines are saved per stock and price unit.</p>}
-            {lines.map((l) => (
-              <div className="ma-row" key={l.id}>
-                <input type="color" value={l.color} onChange={(e) => saveLines(lines.map((x) => (x.id === l.id ? { ...x, color: e.target.value } : x)))} />
-                <span className="line-label">{l.a.time} → {l.b.time}</span>
-                <label className="check" title="Extend to the right">
-                  <input type="checkbox" checked={l.extend} onChange={(e) => saveLines(lines.map((x) => (x.id === l.id ? { ...x, extend: e.target.checked } : x)))} />→
-                </label>
-                <button className="ghost" onClick={() => saveLines(lines.filter((x) => x.id !== l.id))} aria-label="Remove">✕</button>
-              </div>
-            ))}
-            {lines.length > 1 && <button className="ghost" onClick={() => saveLines([])}>Clear all</button>}
-          </section>
-
-          <section>
-            <h4>Moving averages <span className="muted">(periods in bars)</span></h4>
-            {mas.map((m) => (
-              <div className="ma-item" key={m.id}>
-                <div className="ma-row">
-                  <input type="color" value={m.color} onChange={(e) => updateMa(m.id, { color: e.target.value })} aria-label="Color" />
-                  <select value={m.type} onChange={(e) => updateMa(m.id, { type: e.target.value as MaType })}>
-                    {MA_TYPES.map((t) => (
-                      <option key={t.value} value={t.value}>{t.label}</option>
-                    ))}
-                  </select>
-                  <input
-                    type="number"
-                    min={2}
-                    max={500}
-                    value={m.period}
-                    onChange={(e) => updateMa(m.id, { period: Math.max(2, Number(e.target.value) || 2) })}
-                    aria-label="Period"
-                  />
-                  <button className="ghost" onClick={() => setMas(mas.filter((x) => x.id !== m.id))} aria-label="Remove">✕</button>
-                </div>
-                <div className="ma-row ma-style">
-                  <label title="Opacity">
-                    <span className="muted">Opacity</span>
-                    <input
-                      type="range"
-                      min={10}
-                      max={100}
-                      step={5}
-                      value={Math.round((m.opacity ?? 1) * 100)}
-                      onChange={(e) => updateMa(m.id, { opacity: Number(e.target.value) / 100 })}
-                    />
-                    <span className="muted">{Math.round((m.opacity ?? 1) * 100)}%</span>
-                  </label>
-                  <div className="seg small" role="group" aria-label="Line width">
-                    {([1, 2, 3, 4] as const).map((w) => (
-                      <button key={w} className={(m.width ?? 1) === w ? 'on' : ''} onClick={() => updateMa(m.id, { width: w })} title={`${w}px`}>
-                        <span className="width-swatch" style={{ height: w }} />
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ))}
-            <button className="ghost" onClick={addMa}>+ Add average</button>
-          </section>
+          {panel === 'trend' && (
+            <TrendPanel
+              ticker={ticker}
+              shared={shared}
+              channel={data?.channel}
+              fit={fit}
+              interval={interval}
+              win={win}
+              setWin={setWin}
+              tool={tool}
+              setTool={setTool}
+              showChannel={showChannel}
+              setShowChannel={setShowChannel}
+              sigmaLevels={sigmaLevels}
+              setSigmaLevels={setSigmaLevels}
+            />
+          )}
+          {panel === 'objects' && (
+            <ObjectsPanel
+              drawings={drawings}
+              setDrawings={setDrawings}
+              mas={mas}
+              setMas={setMas}
+              onMaSettings={(id) => setDialog({ ma: id })}
+              onAddIndicator={() => setDialog('indicators')}
+            />
+          )}
         </aside>
-      </div>
-    </main>
+      )}
+
+      <nav className="tv-rail" aria-label="Panels">
+        <button className={`rail-btn ${panel === 'watchlist' ? 'on' : ''}`} onClick={() => togglePanel('watchlist')} title="Watchlist and details">{Icon.watchlist}</button>
+        <button className={`rail-btn ${panel === 'trend' ? 'on' : ''}`} onClick={() => togglePanel('trend')} title="Trend channel and distance from trend">{Icon.channel}</button>
+        <button className={`rail-btn ${panel === 'objects' ? 'on' : ''}`} onClick={() => togglePanel('objects')} title="Object tree: indicators and drawings">{Icon.layers}</button>
+        <span className="tb-grow" />
+        <a className="rail-btn" href="#/" title="Leaderboard">{Icon.trophy}</a>
+      </nav>
+
+      {search !== null && (
+        <SymbolSearch tickers={meta.tickers} indices={meta.indices} rows={rows} initial={search} onPick={go} onClose={() => setSearch(null)} />
+      )}
+      {dialog === 'indicators' && <IndicatorsDialog onAdd={addIndicator} onClose={() => setDialog(null)} />}
+      {maDialog && <MaSettings ma={maDialog} onChange={(p) => updateMa(maDialog.id, p)} onClose={() => setDialog(null)} />}
+    </div>
   )
 }

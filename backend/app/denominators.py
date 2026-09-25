@@ -104,12 +104,12 @@ DENOMINATORS: dict[str, Denominator] = {
 _built: dict[str, tuple[tuple[float, ...], pd.Series]] = {}
 
 
-async def series(key: str) -> pd.Series | None:
+async def series(key: str, max_age: float | None = None) -> pd.Series | None:
     """Daily denominator values, or None for plain nominal pesos. Rebuilt only on new data."""
     d = DENOMINATORS[key]
     if d.build is None:
         return None
-    raw = await store.get_many(list(d.sources))
+    raw = await store.get_many(list(d.sources), max_age)
     missing = [s for s in d.sources if s not in raw]
     if missing:
         raise LookupError(f"{d.label}: source data unavailable ({', '.join(missing)})")

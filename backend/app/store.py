@@ -147,11 +147,14 @@ def version(keys: Iterable[str]) -> tuple[float, ...]:
     return tuple(_mem.get(k, (0.0,))[0] for k in keys)
 
 
-async def update(key: str, full: bool = False) -> None:
+async def update(key: str, full: bool = False, max_age: float | None = None) -> None:
     lock = _locks.setdefault(key, asyncio.Lock())
     async with lock:
         fetched = db.fetched_at(key)
-        if not full and fetched is not None and time.time() - fetched < _stale_after(key):
+        # max_age only tightens daily series; monthly CPIs can't have moved within minutes.
+        daily = _stale_after(key) == DAILY_STALE_SECONDS
+        limit = min(max_age, DAILY_STALE_SECONDS) if max_age is not None and daily else _stale_after(key)
+        if not full and fetched is not None and time.time() - fetched < limit:
             return
         fetch, incremental = _source(key)
         old = _cached(key)
@@ -181,11 +184,21 @@ def _refresh_in_background(key: str) -> None:
     task.add_done_callback(_background.discard)
 
 
-async def get(key: str) -> pd.DataFrame:
-    """Cached bars right away; stale ones refresh in the background."""
+async def get(key: str, max_age: float | None = None) -> pd.DataFrame:
+    """Cached bars right away; stale ones refresh in the background.
+
+    With `max_age`, a cache older than that is brought up to date before returning
+    (a small incremental fetch), falling back to the cached copy if the source fails.
+    """
     df = _cached(key)
     if df is None or df.empty:
         await update(key, full=True)
+        return _mem[key][1]
+    if max_age is not None:
+        try:
+            await update(key, max_age=max_age)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("fresh fetch of %s failed, serving cache: %s", key, exc)
         return _mem[key][1]
     fetched = db.fetched_at(key) or 0.0
     lock = _locks.get(key)
@@ -194,8 +207,8 @@ async def get(key: str) -> pd.DataFrame:
     return df
 
 
-async def get_many(keys: list[str]) -> dict[str, pd.DataFrame]:
-    results = await asyncio.gather(*(get(k) for k in keys), return_exceptions=True)
+async def get_many(keys: list[str], max_age: float | None = None) -> dict[str, pd.DataFrame]:
+    results = await asyncio.gather(*(get(k, max_age) for k in keys), return_exceptions=True)
     out = {}
     for key, res in zip(keys, results):
         if isinstance(res, BaseException):
